@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # STM32F103C8T6 项目管理工具 🛠️
-# 功能：一站式处理构建、烧录、重置等开发流程
+# 功能：支持多命令连续执行，含清空屏幕功能
 
 # 颜色定义
 RED='\033[0;31m'
@@ -36,6 +36,20 @@ log_error() {
     echo -e "${RED}❌  ${NC}${BOLD}$1${NC}" >&2
 }
 
+# 清空屏幕
+cmd_clear() {
+    # 检测终端类型，使用对应清屏命令
+    if command -v clear &>/dev/null; then
+        clear
+    elif command -v cls &>/dev/null; then
+        cls
+    else
+        # 兼容无清屏命令的环境，输出多行空白
+        printf "\n%.0s" {1..50}
+    fi
+    return 0
+}
+
 # 检查环境(工具、项目结构)
 cmd_check() {
     log_info "正在检查开发环境 🧐"
@@ -54,7 +68,7 @@ cmd_check() {
         log_info "  - arm-none-eabi-gcc: brew install arm-none-eabi-gcc 🧰"
         log_info "  - stlink (含st-flash): brew install stlink 🔗"
         log_info "  - cmake: brew install cmake 🔨"
-        exit 1
+        return 1
     fi
     
     # 检查项目结构
@@ -68,17 +82,17 @@ cmd_check() {
     if [ ${#missing_files[@]} -ne 0 ]; then
         log_error "项目结构不完整，缺少：${missing_files[*]} 📁"
         log_info "请在项目根目录执行此脚本 📍"
-        exit 1
+        return 1
     fi
     
     log_success "环境检查通过 ✨"
+    return 0
 }
 
 # 清理构建产物
 cmd_clean() {
     log_info "正在清理构建文件 🧹"
     if [ -d "$BUILD_DIR" ]; then
-        # 确认是否有内容需要清理
         if [ "$(ls -A "$BUILD_DIR" 2>/dev/null)" ]; then
             rm -rf "$BUILD_DIR"
             log_info "已删除构建目录：$BUILD_DIR 🗑️"
@@ -89,6 +103,7 @@ cmd_clean() {
         log_info "构建目录不存在，无需清理 🚫"
     fi
     log_success "清理完成 🌟"
+    return 0
 }
 
 # 编译项目(含配置)
@@ -96,26 +111,24 @@ cmd_build() {
     log_info "开始编译项目 🏗️"
     mkdir -p "$BUILD_DIR" || {
         log_error "无法创建构建目录：$BUILD_DIR 🚫"
-        exit 1
+        return 1
     }
     cd "$BUILD_DIR" || {
         log_error "无法进入构建目录：$BUILD_DIR 🚫"
-        exit 1
+        return 1
     }
     
-    # 配置CMake(显示版本信息)
     log_info "正在配置CMake ⚙️"
     if cmake --version | grep -q "cmake version"; then
         if ! cmake ..; then
             log_error "CMake配置失败 ❌"
-            cd .. && exit 1
+            cd .. && return 1
         fi
     else
         log_error "CMake命令异常 🚫"
-        cd .. && exit 1
+        cd .. && return 1
     fi
     
-    # 并行编译(自动适配CPU核心数)
     local jobs
     if jobs=$(nproc 2>/dev/null); then
         :
@@ -128,12 +141,11 @@ cmd_build() {
     log_info "使用 $jobs 线程编译 💻"
     if ! make -j"$jobs"; then
         log_error "编译失败 ❌"
-        cd .. && exit 1
+        cd .. && return 1
     fi
     
-    cd .. || exit 1
+    cd .. || return 1
     
-    # 显示固件信息(格式化输出)
     log_info "固件信息 📊"
     if [ -f "$FIRMWARE_ELF" ]; then
         arm-none-eabi-size "$FIRMWARE_ELF" | awk '
@@ -144,26 +156,24 @@ cmd_build() {
         log_warn "未找到ELF文件，可能编译不完整 ⚠️"
     fi
     log_success "编译完成 -> 输出文件：$FIRMWARE_BIN 🎯"
+    return 0
 }
 
 # 烧录固件到设备
 cmd_flash() {
     log_info "准备烧录固件 📤"
     
-    # 检查固件是否存在
     if [ ! -f "$FIRMWARE_BIN" ]; then
         log_error "未找到固件文件：$FIRMWARE_BIN 🚫"
         log_info "请先执行 ${BOLD}${SCRIPT_NAME} build${NC} 编译项目 🔨"
-        exit 1
+        return 1
     fi
     
-    # 检查设备连接
     log_info "检查ST-Link连接 🔌"
     if ! st-info --probe &>/dev/null; then
         log_warn "未检测到ST-Link设备，尝试直接烧录... 📡"
     fi
     
-    # 执行烧录
     log_info "正在烧录到地址 $FLASH_ADDR 📡"
     if st-flash write "$FIRMWARE_BIN" "$FLASH_ADDR"; then
         log_success "固件已成功烧录到STM32F103C8T6 🎉"
@@ -173,8 +183,9 @@ cmd_flash() {
         log_info "  1. 检查ST-Link与开发板连接 🔗"
         log_info "  2. 确认开发板供电正常 🔋"
         log_info "  3. 尝试先执行 ${BOLD}${SCRIPT_NAME} reset${NC} 重置设备 🔄"
-        exit 1
+        return 1
     fi
+    return 0
 }
 
 # 重置设备
@@ -186,7 +197,9 @@ cmd_reset() {
         log_warn "重置失败，可能原因："
         log_warn "  - 设备未连接或供电异常 🔋"
         log_warn "  - ST-Link驱动问题 🖥️"
+        return 1
     fi
+    return 0
 }
 
 # 完整流程(清理->编译->烧录)
@@ -198,46 +211,70 @@ cmd_full() {
     cmd_build && \
     cmd_flash && \
     log_success "全流程执行完成！🎉"
+    return $?
 }
 
 # 显示帮助信息
 show_help() {
     echo -e "${BOLD}STM32F103C8T6 项目管理工具 🛠️${NC}"
-    echo "用于简化STM32开发中的编译、烧录等流程"
+    echo "支持多命令连续执行，例如: ${SCRIPT_NAME} clear build flash"
     echo
-    echo -e "${BOLD}用法：${NC}${SCRIPT_NAME} <命令>"
+    echo -e "${BOLD}用法：${NC}${SCRIPT_NAME} <命令1> [命令2] [命令3] ..."
     echo
     echo -e "${BOLD}命令列表：${NC}"
+    echo "  clear     🧼 清空屏幕"
     echo "  check     🧐 检查开发环境(必备工具和项目结构)"
     echo "  clean     🧹 清理构建目录及中间文件"
-    echo "  build     🏗️  编译项目并生成固件(.elf和.bin)"
+    echo "  build     🏗️ 编译项目并生成固件(.elf和.bin)"
     echo "  flash     📤 将固件烧录到STM32设备"
     echo "  reset     🔄 重置STM32设备"
     echo "  full      🚀 执行完整流程(check → clean → build → flash)"
-    echo "  help      ℹ️  显示此帮助信息"
+    echo "  help      ℹ️ 显示此帮助信息"
     echo
     echo -e "${BOLD}示例：${NC}"
-    echo "  ${SCRIPT_NAME} build   #  🔨 编译项目"
-    echo "  ${SCRIPT_NAME} full    #  🎯 一键完成清理、编译和烧录"
+    echo "  ${SCRIPT_NAME} clear                # 🧼 仅清空屏幕"
+    echo "  ${SCRIPT_NAME} clear full           # 🧼→🚀 清空屏幕后执行完整流程"
+    echo "  ${SCRIPT_NAME} clear clean build    # 🧼→🧹→🏗️ 清空+清理+编译"
+    return 0
 }
 
-# 主逻辑
-if [ $# -ne 1 ]; then
-    show_help
-    exit 1
-fi
-
-case "$1" in
-    check)  cmd_check ;;
-    clean)  cmd_clean ;;
-    build)  cmd_check; cmd_build ;;  # 编译前自动检查环境
-    flash)  cmd_flash ;;
-    reset)  cmd_reset ;;
-    full)   cmd_full ;;
-    help)   show_help ;;
-    *)
-        log_error "未知命令：$1 🚫"
+# 主逻辑：支持多命令连续执行
+main() {
+    if [ $# -eq 0 ]; then
         show_help
-        exit 1
-        ;;
-esac
+        exit 0
+    fi
+
+    local exit_code=0
+    for cmd in "$@"; do
+        log_info "${BOLD}===== 执行命令: $cmd =====${NC}"
+        case "$cmd" in
+            clear)  cmd_clear ;;
+            check)  cmd_check ;;
+            clean)  cmd_clean ;;
+            build)  cmd_check; cmd_build ;;
+            flash)  cmd_flash ;;
+            reset)  cmd_reset ;;
+            full)   cmd_full ;;
+            help)   show_help ;;
+            *)
+                log_error "未知命令：$cmd 🚫"
+                show_help
+                exit 1
+                ;;
+        esac
+        local current_code=$?
+        if [ $current_code -ne 0 ]; then
+            exit_code=$current_code
+            log_warn "命令 $cmd 执行失败，已停止后续执行 ⚠️"
+            break
+        fi
+    done
+
+    if [ $exit_code -ne 0 ]; then
+        log_error "部分命令执行失败 (错误码: $exit_code) ❗"
+    fi
+    exit $exit_code
+}
+
+main "$@"
